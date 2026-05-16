@@ -2,172 +2,161 @@ import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
 import axios from "axios";
 
 const API = import.meta.env.VITE_API_URL;
+const BASE_URL = `${API}/auth`;
 
-// 🔥 Async login thunk
+// ─── Async Thunks ─────────────────────────────────────────────────────────────
+
 export const loginUser = createAsyncThunk(
     "auth/loginUser",
-    async (userData, { rejectWithValue }) => {
+    async ({ userId, password, role }, { rejectWithValue }) => {
         try {
-            const response = await axios.post(
-                `${API}/auth/login`,
-                userData,
+            const { data } = await axios.post(
+                `${BASE_URL}/login`,
+                { userId, password, role },
                 { withCredentials: true }
             );
-            return response.data;
-        } catch (error) {
-
+            return data.user;
+        } catch (err) {
             return rejectWithValue(
-                error.response?.data?.message || "Login failed"
+                err.response?.data?.message || "Login failed."
             );
         }
     }
 );
 
-
-// 🔥 Async signup thunk
-export const signupUser = createAsyncThunk(
-    "auth/signupUser",
-    async (userData, { rejectWithValue }) => {
-        try {
-            const response = await axios.post(
-                `${API}/auth/signup`,
-                userData,
-                { withCredentials: true }
-            );
-            return response.data;
-
-        } catch (error) {
-
-            return rejectWithValue(
-                error.response?.data?.message || "Signup failed"
-            );
-        }
-    }
-);
-
-// 🔥 Get Current User (auto login from cookie)
 export const getUser = createAsyncThunk(
     "auth/getUser",
     async (_, { rejectWithValue }) => {
         try {
-
-            const response = await axios.get(
-                `${API}/auth/me`,
-                { withCredentials: true } // VERY IMPORTANT for cookies
+            const { data } = await axios.get(
+                `${BASE_URL}/me`,
+                { withCredentials: true }
             );
-
-            return response.data;
-
-        } catch (error) {
-
+            return data.user;
+        } catch (err) {
             return rejectWithValue(
-                error.response?.data?.message || "Failed to fetch user"
+                err.response?.data?.message || "Failed to fetch user."
             );
-
         }
     }
 );
 
-// 🔥 Logout User
 export const logoutUser = createAsyncThunk(
     "auth/logoutUser",
     async (_, { rejectWithValue }) => {
         try {
             await axios.post(
-                `${API}/auth/logout`,
+                `${BASE_URL}/logout`,
                 {},
                 { withCredentials: true }
             );
-
             return true;
-
-        } catch (error) {
+        } catch (err) {
             return rejectWithValue(
-                error.response?.data?.message || "Logout failed"
+                err.response?.data?.message || "Logout failed."
             );
-
         }
     }
 );
 
+// ─── Initial State ─────────────────────────────────────────────────────────────
 
 const initialState = {
     user: null,
-    loading: false,
-    error: null
+    isAuthenticated: false,
+
+    loading: {
+        login: false,
+        logout: false,
+        profile: true,
+    },
+
+    error: {
+        login: null,
+        logout: null,
+        profile: null,
+    },
 };
+
+// ─── Slice ────────────────────────────────────────────────────────────────────
 
 const authSlice = createSlice({
     name: "auth",
     initialState,
-    reducers: {},
-
+    reducers: {
+        clearErrors(state) {
+            state.error = {
+                login: null,
+                logout: null,
+                profile: null,
+            };
+        },
+    },
     extraReducers: (builder) => {
+
+        // ── Login ──────────────────────────────────────────────────────────────
         builder
-            // LOGIN
             .addCase(loginUser.pending, (state) => {
-                state.loading = true;
-                state.error = null;
+                state.loading.login = true;
+                state.error.login = null;
             })
-
             .addCase(loginUser.fulfilled, (state, action) => {
-                state.loading = false;
-                state.user = action.payload.user;
+                state.loading.login = false;
+                state.user = action.payload;
+                state.isAuthenticated = true;
             })
-
             .addCase(loginUser.rejected, (state, action) => {
-                state.loading = false;
-                state.error = action.payload;
-            })
+                state.loading.login = false;
+                state.error.login = action.payload;
+            });
 
-
-            // SIGNUP
-            .addCase(signupUser.pending, (state) => {
-                state.loading = true;
-                state.error = null;
-            })
-
-            .addCase(signupUser.fulfilled, (state, action) => {
-                state.loading = false;
-                state.user = action.payload.user;
-            })
-
-            .addCase(signupUser.rejected, (state, action) => {
-                state.loading = false;
-                state.error = action.payload;
-            })
-
-            // GET USER
+        // ── Get User (session restore) ─────────────────────────────────────────
+        builder
             .addCase(getUser.pending, (state) => {
-                state.loading = true;
+                state.loading.profile = true;
+                state.error.profile = null;
             })
-
             .addCase(getUser.fulfilled, (state, action) => {
-                state.loading = false;
-                state.user = action.payload.user;
+                state.loading.profile = false;
+                state.user = action.payload;
+                state.isAuthenticated = true;
             })
-
-            .addCase(getUser.rejected, (state) => {
-                state.loading = false;
+            .addCase(getUser.rejected, (state, action) => {
+                state.loading.profile = false;
+                state.error.profile = action.payload;
+                // expired / invalid cookie → treat as logged out
                 state.user = null;
-            })
+                state.isAuthenticated = false;
+            });
 
-            // LOGOUT
+        // ── Logout ─────────────────────────────────────────────────────────────
+        builder
             .addCase(logoutUser.pending, (state) => {
-                state.loading = true;
+                state.loading.logout = true;
+                state.error.logout = null;
             })
-
             .addCase(logoutUser.fulfilled, (state) => {
-                state.loading = false;
+                state.loading.logout = false;
                 state.user = null;
+                state.isAuthenticated = false;
             })
-
             .addCase(logoutUser.rejected, (state, action) => {
-                state.loading = false;
-                state.error = action.payload;
-            })
-
-    }
+                state.loading.logout = false;
+                state.error.logout = action.payload;
+                // clear local state even if server call failed
+                state.user = null;
+                state.isAuthenticated = false;
+            });
+    },
 });
+
+export const { clearErrors } = authSlice.actions;
+
+// ─── Selectors ────────────────────────────────────────────────────────────────
+
+export const selectUser = (state) => state.auth.user;
+export const selectIsAuthenticated = (state) => state.auth.isAuthenticated;
+export const selectAuthLoading = (state) => state.auth.loading;
+export const selectAuthError = (state) => state.auth.error;
 
 export default authSlice.reducer;

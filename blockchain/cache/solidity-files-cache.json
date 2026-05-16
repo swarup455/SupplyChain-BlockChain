@@ -1,0 +1,40 @@
+{
+  "_format": "hh-sol-cache-2",
+  "files": {
+    "C:\\Users\\acer\\OneDrive\\Desktop\\FInal Year Project\\blockchain\\contracts\\FurnitureSupplyChain.sol": {
+      "lastModificationDate": 1778840563743,
+      "contentHash": "857ce39ca838e8664086c536a4a605b2",
+      "sourceName": "contracts/FurnitureSupplyChain.sol",
+      "solcConfig": {
+        "version": "0.8.0",
+        "settings": {
+          "optimizer": {
+            "enabled": false,
+            "runs": 200
+          },
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [],
+      "versionPragmas": [
+        "^0.8.0"
+      ],
+      "artifacts": [
+        "FurnitureSupplyChain"
+      ]
+    }
+  }
+}

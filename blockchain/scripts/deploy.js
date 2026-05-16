@@ -1,14 +1,14 @@
-const hre = require("hardhat");
+import hre from "hardhat";
 
 async function main() {
-    const Contract = await hre.ethers.getContractFactory("FurnitureSupplyChain");
-    const contract = await Contract.deploy();
-    await contract.waitForDeployment();
+  const Contract = await hre.ethers.getContractFactory("FurnitureSupplyChain");
+  const contract = await Contract.deploy();
+  await contract.waitForDeployment();
 
-    console.log("Contract deployed to:", await contract.getAddress());
+  console.log("Contract deployed to:", await contract.getAddress());
 }
 
 main().catch((error) => {
-    console.error(error);
-    process.exit(1);
+  console.error(error);
+  process.exit(1);
 });
