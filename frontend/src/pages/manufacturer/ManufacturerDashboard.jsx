@@ -1,7 +1,11 @@
-import { useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { useNavigate } from "react-router-dom";
 import { logoutUser } from "../../redux/authSlice";
+import { createFinishedProduct, transferOwnership, getProductHistory } from "../../blockchain/contract";
+import { getWalletAddress, onAccountChange } from "../../blockchain/provider";
+import { WALLETS } from "../../blockchain/wallets";
+import { useState, useEffect } from "react";
+import { generateProductID } from "../../utils/generateIds";
 import {
     ShieldCheck, Package, Cpu, ClipboardList, TrendingUp,
     ArrowRight, LogOut, Clock, CheckCircle2, AlertCircle,
@@ -9,41 +13,12 @@ import {
     Hash, Calendar, User
 } from "lucide-react";
 
-// ── Mock data ──────────────────────────────────────────────────────────────
-const STATS = [
-    { label: "Materials Received", value: "128", sub: "+12 this week", icon: <Boxes size={18} />, color: "bg-indigo-50 text-indigo-600" },
-    { label: "Products Created", value: "74", sub: "+5 today", icon: <Factory size={18} />, color: "bg-emerald-50 text-emerald-600" },
-    { label: "Pending Transfers", value: "9", sub: "Awaiting dispatch", icon: <Clock size={18} />, color: "bg-amber-50 text-amber-600" },
-    { label: "Blockchain Records", value: "203", sub: "Immutable entries", icon: <ShieldCheck size={18} />, color: "bg-purple-50 text-purple-600" },
-];
-
-const MATERIALS = [
-    { id: "TMB-1001", batch: "BATCH-A1", supplier: "SUP01", type: "Teak Wood", qty: "200 kg", date: "10 May 2026", status: "received" },
-    { id: "TMB-1002", batch: "BATCH-A2", supplier: "SUP02", type: "Mahogany", qty: "150 kg", date: "11 May 2026", status: "received" },
-    { id: "TMB-1003", batch: "BATCH-A3", supplier: "SUP01", type: "Rosewood", qty: "80 kg", date: "13 May 2026", status: "pending" },
-    { id: "TMB-1004", batch: "BATCH-A4", supplier: "SUP03", type: "Walnut", qty: "120 kg", date: "14 May 2026", status: "pending" },
-];
-
-const PRODUCTS = [
-    { id: "DT2026-001", name: "Oak Dining Table", material: "TMB-1001", stage: "Production Completed", hash: "0xA45F89B21C", date: "12 May 2026" },
-    { id: "DT2026-002", name: "Teak Wardrobe", material: "TMB-1002", stage: "Dispatched", hash: "0xB98D72KLM4", date: "13 May 2026" },
-    { id: "DT2026-003", name: "Walnut Bookshelf", material: "TMB-1001", stage: "In Production", hash: "0xC12E45NOP7", date: "14 May 2026" },
-];
-
-const ACTIVITY = [
-    { text: "Product DT2026-002 dispatched to Distributor DIST01", time: "2h ago", type: "success" },
-    { text: "Material TMB-1003 received from Supplier SUP01", time: "5h ago", type: "info" },
-    { text: "Blockchain record created for DT2026-001", time: "8h ago", type: "success" },
-    { text: "Product DT2026-003 entered production stage", time: "1d ago", type: "info" },
-    { text: "Ownership transfer pending for DT2026-002", time: "1d ago", type: "warning" },
-];
-
-// ── Status badge ────────────────────────────────────────────────────────────
 function StatusBadge({ status }) {
     const map = {
-        received: "bg-emerald-50 text-emerald-600",
-        pending: "bg-amber-50 text-amber-600",
-        dispatched: "bg-indigo-50 text-indigo-600",
+        available: "bg-emerald-50 text-emerald-600",
+        used: "bg-red-50 text-red-400",
+        ready: "bg-indigo-50 text-indigo-600",
+        dispatched: "bg-purple-50 text-purple-600",
     };
     return (
         <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-full capitalize ${map[status] ?? "bg-gray-100 text-gray-500"}`}>
@@ -77,18 +52,244 @@ export default function ManufacturerDashboard() {
     const navigate = useNavigate();
     const { user } = useSelector((state) => state.auth);
     const [activeTab, setActiveTab] = useState("overview");
+    const [walletAddress, setWalletAddress] = useState("");
+    const [myTimber, setMyTimber] = useState([]);
+    const [finishedProducts, setFinishedProducts] = useState([]);
+    const [allHistory, setAllHistory] = useState([]);
+    const [loadingProducts, setLoadingProducts] = useState(false);
+    const [newProductID, setNewProductID] = useState("");
+    const [selectedTimber, setSelectedTimber] = useState("");
+    const [productNotes, setProductNotes] = useState("");
+    const [createLoading, setCreateLoading] = useState(false);
+    const [createHash, setCreateHash] = useState("");
+    const [createError, setCreateError] = useState("");
+    const [dispatchedCount, setDispatchedCount] = useState(0);
 
+    // Dispatch to distributor states
+    const [selectedFinishedProduct, setSelectedFinishedProduct] = useState("");
+    const [txLoading, setTxLoading] = useState(false);
+    const [txHash, setTxHash] = useState("");
+    const [txError, setTxError] = useState("");
+
+    // Manufacturer ID from Redux user
+    const manufacturerID = user?.userId ?? "MFG-0001";
+
+    // ── Stats derived from real data ─────────────────────────────────────────
+    const STATS = [
+        {
+            label: "Raw Materials",
+            value: myTimber.length.toString(),
+            sub: "Timber assigned to you",
+            icon: <Boxes size={18} />,
+            color: "bg-indigo-50 text-indigo-600"
+        },
+        {
+            label: "Finished Products",
+            value: finishedProducts.length.toString(),
+            sub: "Created by you",
+            icon: <Factory size={18} />,
+            color: "bg-emerald-50 text-emerald-600"
+        },
+        {
+            label: "Dispatched",
+            value: dispatchedCount.toString(),
+            sub: "Sent to distributor",
+            icon: <Clock size={18} />,
+            color: "bg-amber-50 text-amber-600"
+        },
+        {
+            label: "Blockchain Records",
+            value: allHistory.length.toString(),
+            sub: "Immutable entries",
+            icon: <ShieldCheck size={18} />,
+            color: "bg-purple-50 text-purple-600"
+        },
+    ];
+
+    // ── Tabs ─────────────────────────────────────────────────────────────────
+    const tabs = [
+        { id: "overview", label: "Overview", icon: <BarChart3 size={15} /> },
+        { id: "materials", label: "Raw Materials", icon: <Boxes size={15} /> },
+        { id: "products", label: "Create Product", icon: <Factory size={15} /> },
+        { id: "dispatch", label: "Dispatch", icon: <ArrowRight size={15} /> },
+        { id: "records", label: "Records", icon: <ClipboardList size={15} /> },
+    ];
+
+    // ── Logout ───────────────────────────────────────────────────────────────
     const handleLogout = () => {
         dispatch(logoutUser());
         navigate("/");
     };
 
-    const tabs = [
-        { id: "overview", label: "Overview", icon: <BarChart3 size={15} /> },
-        { id: "materials", label: "Receive Materials", icon: <Boxes size={15} /> },
-        { id: "products", label: "Create Products", icon: <Factory size={15} /> },
-        { id: "records", label: "Production Records", icon: <ClipboardList size={15} /> },
-    ];
+    // ── Check wallet role on mount ───────────────────────────────────────────
+    useEffect(() => {
+        const checkRole = async () => {
+            try {
+                const address = await getWalletAddress();
+                setWalletAddress(address);
+                if (address.toLowerCase() !== WALLETS.manufacturer.toLowerCase()) {
+                    alert("⚠️ Please switch MetaMask to the Manufacturer account!");
+                }
+            } catch (err) {
+                console.error(err);
+            }
+        };
+        checkRole();
+        onAccountChange((newAddress) => setWalletAddress(newAddress));
+    }, []);
+
+    // ── Fetch all products from blockchain, split into timber vs finished ────
+    useEffect(() => {
+        const fetchMyProducts = async () => {
+            setLoadingProducts(true);
+            try {
+                const { ethers } = await import("ethers");
+                const { ABI, CONTRACT_ADDRESS } = await import("../../blockchain/config");
+
+                const provider = new ethers.BrowserProvider(window.ethereum);
+                const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
+
+                const ids = await Promise.all(
+                    [...Array(20).keys()].map(i =>
+                        contract.allProductIDs(i).catch(() => null)
+                    )
+                );
+
+                const allProducts = await Promise.all(
+                    ids.filter(Boolean).map(id => contract.getProduct(id))
+                );
+
+                // Only products currently owned by manufacturer
+                const mine = allProducts.filter(p =>
+                    p.currentOwner.toLowerCase() === WALLETS.manufacturer.toLowerCase()
+                );
+
+                // Split: timber IDs start with "TMB-", finished products start with "FP-"
+                const timber = mine
+                    .filter(p => p.productID.startsWith("TMB-"))
+                    .map(p => ({
+                        id: p.productID,
+                        timberBatchID: p.timberBatchID,
+                        stage: Number(p.stage),
+                        currentOwner: p.currentOwner,
+                        timestamp: new Date(Number(p.timestamp) * 1000).toLocaleDateString(),
+                        timberUsed: p.timberUsed,
+                        status: p.timberUsed ? "used" : "available",
+                    }));
+
+                const finished = mine
+                    .filter(p => p.productID.startsWith("FP-"))
+                    .map(p => ({
+                        id: p.productID,
+                        timberBatchID: p.timberBatchID,
+                        stage: Number(p.stage),
+                        currentOwner: p.currentOwner,
+                        timestamp: new Date(Number(p.timestamp) * 1000).toLocaleDateString(),
+                        status: "ready",
+                    }));
+
+                setMyTimber(timber);
+                setFinishedProducts(finished);
+
+                const allFP = allProducts.filter(p => p.productID.startsWith("FP-"));
+                const dispatched = allFP.filter(p => Number(p.stage) > 1);
+                setDispatchedCount(dispatched.length);
+
+            } catch (err) {
+                console.error(err);
+            } finally {
+                setLoadingProducts(false);
+            }
+        };
+
+        if (window.ethereum) fetchMyProducts();
+    }, [txHash, createHash]);  // refetch after any transaction
+
+    // ── Fetch history for all finished products ──────────────────────────────
+    useEffect(() => {
+        const fetchHistory = async () => {
+            try {
+                const { ethers } = await import("ethers");
+                const { ABI, CONTRACT_ADDRESS } = await import("../../blockchain/config");
+
+                const provider = new ethers.BrowserProvider(window.ethereum);
+                const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
+
+                // Fetch ALL product IDs — not just ones currently owned by manufacturer
+                const ids = await Promise.all(
+                    [...Array(20).keys()].map(i =>
+                        contract.allProductIDs(i).catch(() => null)
+                    )
+                );
+
+                const validIDs = ids.filter(Boolean);
+
+                // Only fetch history for FP- products (finished products made by manufacturer)
+                const fpIDs = validIDs.filter(id => id.startsWith("FP-"));
+
+                if (fpIDs.length === 0) return;
+
+                const histories = await Promise.all(
+                    fpIDs.map(id => getProductHistory(id))
+                );
+
+                setAllHistory(histories.flat());
+            } catch (err) {
+                console.error(err);
+            }
+        };
+
+        if (window.ethereum) fetchHistory();
+    }, [txHash, createHash]); // refetch after any transaction
+
+    // ── Auto-generate Product ID when switching to Create Product tab ────────
+    useEffect(() => {
+        if (activeTab === "products") {
+            setNewProductID(generateProductID());
+        }
+    }, [activeTab]);
+
+    // ── Create finished product on blockchain ────────────────────────────────
+    const handleCreateProduct = async () => {
+        if (!selectedTimber || !newProductID) return;
+        setCreateLoading(true);
+        setCreateError("");
+        setCreateHash("");
+        try {
+            const { createFinishedProduct } = await import("../../blockchain/contract");
+            const notes = productNotes.trim() || "Finished product registered by manufacturer";
+            const hash = await createFinishedProduct(newProductID, selectedTimber, notes);
+            setCreateHash(hash);
+            setNewProductID(generateProductID()); // ready for next product
+            setSelectedTimber("");
+            setProductNotes("");
+        } catch (err) {
+            setCreateError(err.message || "Product creation failed");
+        } finally {
+            setCreateLoading(false);
+        }
+    };
+
+    // ── Dispatch finished product to distributor ─────────────────────────────
+    const handleDispatchToDistributor = async () => {
+        if (!selectedFinishedProduct) return;
+        setTxLoading(true);
+        setTxError("");
+        setTxHash("");
+        try {
+            const hash = await transferOwnership(
+                selectedFinishedProduct,
+                WALLETS.distributor,
+                "Dispatched to Distributor"
+            );
+            setTxHash(hash);
+            setSelectedFinishedProduct("");
+        } catch (err) {
+            setTxError(err.message || "Dispatch failed");
+        } finally {
+            setTxLoading(false);
+        }
+    };
 
     return (
         <div className="min-h-screen bg-[#f5f5f7]">
@@ -177,18 +378,20 @@ export default function ManufacturerDashboard() {
                         <div className="lg:col-span-2 bg-white border border-gray-100 rounded-2xl p-6">
                             <SectionHeader label="Production" title="Recent Products" action="View all" />
                             <div className="space-y-3">
-                                {PRODUCTS.map((p) => (
-                                    <div key={p.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl hover:bg-indigo-50/50 transition-colors">
+                                {finishedProducts.length === 0 ? (
+                                    <p className="text-xs text-gray-400 text-center py-6">No finished products yet.</p>
+                                ) : finishedProducts.slice(0, 3).map((p) => (
+                                    <div key={p.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl">
                                         <div className="flex items-center gap-3">
                                             <div className="w-9 h-9 bg-indigo-100 rounded-xl flex items-center justify-center shrink-0">
                                                 <Package size={16} className="text-indigo-600" />
                                             </div>
                                             <div>
-                                                <p className="text-sm font-semibold text-gray-900">{p.name}</p>
-                                                <p className="text-[11px] text-gray-400">{p.id} · {p.date}</p>
+                                                <p className="text-sm font-semibold text-gray-900">{p.id}</p>
+                                                <p className="text-[11px] text-gray-400">{p.timberBatchID} · {p.timestamp}</p>
                                             </div>
                                         </div>
-                                        <StatusBadge status={p.stage === "Dispatched" ? "dispatched" : p.stage === "Production Completed" ? "received" : "pending"} />
+                                        <StatusBadge status={p.status} />
                                     </div>
                                 ))}
                             </div>
@@ -198,19 +401,14 @@ export default function ManufacturerDashboard() {
                         <div className="bg-white border border-gray-100 rounded-2xl p-6">
                             <SectionHeader label="Live" title="Activity Feed" />
                             <div className="space-y-4">
-                                {ACTIVITY.map((a, i) => (
+                                {allHistory.slice(0, 5).map((entry, i) => (
                                     <div key={i} className="flex gap-3">
-                                        <div className={`mt-0.5 w-6 h-6 rounded-full flex items-center justify-center shrink-0
-                                            ${a.type === "success" ? "bg-emerald-50 text-emerald-500"
-                                                : a.type === "warning" ? "bg-amber-50 text-amber-500"
-                                                    : "bg-indigo-50 text-indigo-500"}`}>
-                                            {a.type === "success" ? <CheckCircle2 size={13} />
-                                                : a.type === "warning" ? <AlertCircle size={13} />
-                                                    : <Activity size={13} />}
+                                        <div className="mt-0.5 w-6 h-6 rounded-full flex items-center justify-center shrink-0 bg-emerald-50 text-emerald-500">
+                                            <CheckCircle2 size={13} />
                                         </div>
                                         <div>
-                                            <p className="text-xs text-gray-700 leading-relaxed">{a.text}</p>
-                                            <p className="text-[11px] text-gray-400 mt-0.5">{a.time}</p>
+                                            <p className="text-xs text-gray-700">{entry.stage} — {entry.notes}</p>
+                                            <p className="text-[11px] text-gray-400 mt-0.5">{entry.timestamp}</p>
                                         </div>
                                     </div>
                                 ))}
@@ -247,44 +445,38 @@ export default function ManufacturerDashboard() {
                 {activeTab === "materials" && (
                     <div className="bg-white border border-gray-100 rounded-2xl p-6">
                         <SectionHeader label="Incoming" title="Raw Materials from Suppliers" />
-
                         <div className="overflow-x-auto">
                             <table className="w-full text-sm">
                                 <thead>
                                     <tr className="border-b border-gray-100">
-                                        {["Batch ID", "Material ID", "Supplier", "Type", "Quantity", "Date", "Status"].map((h) => (
-                                            <th key={h} className="text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wider pb-3 pr-4">
-                                                {h}
-                                            </th>
+                                        {["Product ID", "Timber Batch", "Received On", "Status"].map((h) => (
+                                            <th key={h} className="text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wider pb-3 pr-4">{h}</th>
                                         ))}
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-gray-50">
-                                    {MATERIALS.map((m) => (
-                                        <tr key={m.id} className="hover:bg-gray-50 transition-colors">
+                                    {loadingProducts ? (
+                                        <tr><td colSpan={4} className="py-8 text-center text-xs text-gray-400">Loading from blockchain...</td></tr>
+                                    ) : myTimber.length === 0 ? (
+                                        <tr><td colSpan={4} className="py-8 text-center text-xs text-gray-400">No timber assigned yet.</td></tr>
+                                    ) : myTimber.map((m) => (
+                                        <tr key={m.id} className="transition-colors opacity-60 cursor-not-allowed">
                                             <td className="py-3 pr-4">
-                                                <span className="font-mono text-xs bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-md">{m.batch}</span>
+                                                <span className="font-mono text-xs bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-md">{m.id}</span>
                                             </td>
-                                            <td className="py-3 pr-4 text-xs text-gray-600 font-medium">{m.id}</td>
-                                            <td className="py-3 pr-4 text-xs text-gray-500">{m.supplier}</td>
-                                            <td className="py-3 pr-4 text-xs text-gray-700 font-medium">{m.type}</td>
-                                            <td className="py-3 pr-4 text-xs text-gray-500">{m.qty}</td>
-                                            <td className="py-3 pr-4 text-xs text-gray-400">{m.date}</td>
+                                            <td className="py-3 pr-4 text-xs text-gray-600 font-medium">{m.timberBatchID}</td>
+                                            <td className="py-3 pr-4 text-xs text-gray-400">{m.timestamp}</td>
                                             <td className="py-3"><StatusBadge status={m.status} /></td>
                                         </tr>
                                     ))}
                                 </tbody>
                             </table>
                         </div>
-
-                        <div className="mt-6 p-4 bg-indigo-50 border border-indigo-100 rounded-xl flex items-center justify-between">
-                            <div>
-                                <p className="text-sm font-semibold text-indigo-700">Confirm material receipt</p>
-                                <p className="text-xs text-indigo-400 mt-0.5">Confirming receipt creates an immutable blockchain record.</p>
-                            </div>
-                            <button className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium px-4 py-2 rounded-xl transition-colors">
-                                Confirm Receipt <ArrowRight size={14} />
-                            </button>
+                        <div className="mt-6 p-4 bg-gray-50 border border-gray-100 rounded-xl">
+                            <p className="text-xs text-gray-400">
+                                Timber marked as <span className="text-red-400 font-semibold">used</span> has been consumed to create a finished product.
+                                Go to <span className="text-indigo-500 font-semibold cursor-pointer" onClick={() => setActiveTab("products")}>Create Product</span> to use available timber.
+                            </p>
                         </div>
                     </div>
                 )}
@@ -297,77 +489,184 @@ export default function ManufacturerDashboard() {
                         <div className="bg-white border border-gray-100 rounded-2xl p-6">
                             <SectionHeader label="Blockchain Entry" title="Register New Product" />
                             <div className="space-y-4">
-                                {[
-                                    { label: "Product ID", placeholder: "e.g. DT2026-004", icon: <Hash size={14} /> },
-                                    { label: "Product Name", placeholder: "e.g. Oak Dining Table", icon: <Package size={14} /> },
-                                    { label: "Linked Material Batch", placeholder: "e.g. TMB-1001", icon: <Boxes size={14} /> },
-                                    { label: "Manufacturer ID", placeholder: "e.g. MFG01", icon: <Factory size={14} /> },
-                                    { label: "Production Date", placeholder: "", icon: <Calendar size={14} />, type: "date" },
-                                ].map((f) => (
-                                    <div key={f.label}>
-                                        <label className="block text-[11px] font-medium uppercase tracking-widest text-gray-400 mb-1.5">
-                                            {f.label}
-                                        </label>
-                                        <div className="relative flex items-center">
-                                            <span className="absolute left-3 text-gray-300">{f.icon}</span>
-                                            <input
-                                                type={f.type ?? "text"}
-                                                placeholder={f.placeholder}
-                                                className="w-full pl-9 pr-3 py-2.5 border border-gray-200 rounded-xl text-sm text-gray-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/10"
-                                            />
-                                        </div>
-                                    </div>
-                                ))}
 
+                                {/* Product ID — readonly, auto-generated */}
                                 <div>
-                                    <label className="block text-[11px] font-medium uppercase tracking-widest text-gray-400 mb-1.5">
-                                        Production Stage
-                                    </label>
+                                    <label className="block text-[11px] font-medium uppercase tracking-widest text-gray-400 mb-1.5">Product ID</label>
                                     <div className="relative flex items-center">
-                                        <Cpu size={14} className="absolute left-3 text-gray-300" />
-                                        <select className="w-full pl-9 pr-3 py-2.5 border border-gray-200 rounded-xl text-sm text-gray-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/10 appearance-none bg-white">
-                                            <option value="">Select stage</option>
-                                            <option>In Production</option>
-                                            <option>Production Completed</option>
-                                            <option>Ready for Dispatch</option>
+                                        <Hash size={14} className="absolute left-3 text-gray-300" />
+                                        <input
+                                            readOnly
+                                            value={newProductID}
+                                            className="w-full pl-9 pr-3 py-2.5 border border-gray-200 rounded-xl text-sm text-gray-500 bg-gray-50 cursor-not-allowed"
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* Manufacturer ID — readonly, from Redux */}
+                                <div>
+                                    <label className="block text-[11px] font-medium uppercase tracking-widest text-gray-400 mb-1.5">Manufacturer ID</label>
+                                    <div className="relative flex items-center">
+                                        <Factory size={14} className="absolute left-3 text-gray-300" />
+                                        <input
+                                            readOnly
+                                            value={manufacturerID}
+                                            className="w-full pl-9 pr-3 py-2.5 border border-gray-200 rounded-xl text-sm text-gray-500 bg-gray-50 cursor-not-allowed"
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* Select Timber — dropdown of available timber */}
+                                <div>
+                                    <label className="block text-[11px] font-medium uppercase tracking-widest text-gray-400 mb-1.5">Select Timber (Source)</label>
+                                    <div className="relative flex items-center">
+                                        <Boxes size={14} className="absolute left-3 text-gray-300" />
+                                        <select
+                                            value={selectedTimber}
+                                            onChange={(e) => setSelectedTimber(e.target.value)}
+                                            className="w-full pl-9 pr-3 py-2.5 border border-gray-200 rounded-xl text-sm text-gray-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/10 appearance-none bg-white"
+                                        >
+                                            <option value="">Select available timber...</option>
+                                            {myTimber.filter(t => !t.timberUsed).map(t => (
+                                                <option key={t.id} value={t.id}>{t.id} — {t.timberBatchID}</option>
+                                            ))}
                                         </select>
                                     </div>
                                 </div>
 
-                                <button className="w-full py-2.5 mt-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-medium flex items-center justify-center gap-2 transition-colors">
+                                {/* Notes — furniture name, wood type, etc. */}
+                                <div>
+                                    <label className="block text-[11px] font-medium uppercase tracking-widest text-gray-400 mb-1.5">Product Notes</label>
+                                    <div className="relative flex items-center">
+                                        <Package size={14} className="absolute left-3 text-gray-300" />
+                                        <input
+                                            type="text"
+                                            placeholder="e.g. Oak Dining Table | Teak | 4-seater"
+                                            value={productNotes}
+                                            onChange={(e) => setProductNotes(e.target.value)}
+                                            className="w-full pl-9 pr-3 py-2.5 border border-gray-200 rounded-xl text-sm text-gray-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/10"
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* Success / Error feedback */}
+                                {createHash && (
+                                    <div className="flex items-center gap-2 p-3 bg-emerald-50 border border-emerald-100 rounded-xl">
+                                        <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />
+                                        <p className="text-xs text-emerald-700 font-mono truncate">Registered! Tx: {createHash.slice(0, 20)}...</p>
+                                    </div>
+                                )}
+                                {createError && (
+                                    <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-100 rounded-xl">
+                                        <AlertCircle size={14} className="text-red-400 shrink-0" />
+                                        <p className="text-xs text-red-600 truncate">{createError}</p>
+                                    </div>
+                                )}
+
+                                <button
+                                    onClick={handleCreateProduct}
+                                    disabled={createLoading || !selectedTimber}
+                                    className="w-full py-2.5 mt-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-sm font-medium flex items-center justify-center gap-2 transition-colors"
+                                >
                                     <ShieldCheck size={15} />
-                                    Register to Blockchain
+                                    {createLoading ? "Registering..." : "Register to Blockchain"}
                                 </button>
                             </div>
                         </div>
 
-                        {/* Existing products */}
+                        {/* Finished products list */}
                         <div className="bg-white border border-gray-100 rounded-2xl p-6">
-                            <SectionHeader label="Registered" title="Products on Blockchain" />
+                            <SectionHeader label="Registered" title="Finished Products on Blockchain" />
                             <div className="space-y-3">
-                                {PRODUCTS.map((p) => (
+                                {finishedProducts.length === 0 ? (
+                                    <p className="text-xs text-gray-400 text-center py-8">No finished products yet. Create one using available timber.</p>
+                                ) : finishedProducts.map((p) => (
                                     <div key={p.id} className="border border-gray-100 rounded-xl p-4 hover:border-indigo-100 transition-colors">
-                                        <div className="flex items-start justify-between mb-3">
+                                        <div className="flex items-start justify-between mb-2">
                                             <div>
-                                                <p className="text-sm font-semibold text-gray-900">{p.name}</p>
-                                                <p className="text-xs text-gray-400 mt-0.5">{p.id} · {p.date}</p>
+                                                <p className="text-sm font-semibold text-gray-900 font-mono">{p.id}</p>
+                                                <p className="text-xs text-gray-400 mt-0.5">{p.timestamp}</p>
                                             </div>
-                                            <StatusBadge status={p.stage === "Dispatched" ? "dispatched" : p.stage === "Production Completed" ? "received" : "pending"} />
+                                            <StatusBadge status={p.status} />
                                         </div>
                                         <div className="flex items-center gap-2 mt-2">
-                                            <Hash size={11} className="text-gray-300" />
-                                            <span className="font-mono text-[11px] text-gray-400">{p.hash}</span>
-                                        </div>
-                                        <div className="flex items-center gap-2 mt-1.5">
                                             <Boxes size={11} className="text-gray-300" />
-                                            <span className="text-[11px] text-gray-400">Material: {p.material}</span>
+                                            <span className="text-[11px] text-gray-400">Source Timber: {p.timberBatchID}</span>
                                         </div>
-                                        <button className="mt-3 w-full text-xs text-indigo-500 hover:text-indigo-700 border border-indigo-100 hover:border-indigo-300 py-1.5 rounded-lg transition-colors font-medium flex items-center justify-center gap-1">
-                                            Transfer Ownership <ArrowRight size={12} />
-                                        </button>
                                     </div>
                                 ))}
                             </div>
+                        </div>
+                    </div>
+                )}
+
+                {activeTab === "dispatch" && (
+                    <div className="bg-white border border-gray-100 rounded-2xl p-6">
+                        <SectionHeader label="Transfer" title="Dispatch to Distributor" />
+
+                        <div className="overflow-x-auto mb-6">
+                            <table className="w-full text-sm">
+                                <thead>
+                                    <tr className="border-b border-gray-100">
+                                        {["Product ID", "Source Timber", "Created On", "Status", "Select"].map((h) => (
+                                            <th key={h} className="text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wider pb-3 pr-4">{h}</th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-50">
+                                    {loadingProducts ? (
+                                        <tr><td colSpan={5} className="py-8 text-center text-xs text-gray-400">Loading from blockchain...</td></tr>
+                                    ) : finishedProducts.length === 0 ? (
+                                        <tr><td colSpan={5} className="py-8 text-center text-xs text-gray-400">No finished products to dispatch.</td></tr>
+                                    ) : finishedProducts.map((p) => (
+                                        <tr
+                                            key={p.id}
+                                            onClick={() => setSelectedFinishedProduct(p.id)}
+                                            className={`cursor-pointer transition-colors ${selectedFinishedProduct === p.id ? "bg-indigo-50" : "hover:bg-gray-50"}`}
+                                        >
+                                            <td className="py-3 pr-4">
+                                                <span className="font-mono text-xs bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-md">{p.id}</span>
+                                            </td>
+                                            <td className="py-3 pr-4 text-xs text-gray-600 font-medium">{p.timberBatchID}</td>
+                                            <td className="py-3 pr-4 text-xs text-gray-400">{p.timestamp}</td>
+                                            <td className="py-3 pr-4"><StatusBadge status={p.status} /></td>
+                                            <td className="py-3">
+                                                <div className={`w-4 h-4 rounded-full border-2 ${selectedFinishedProduct === p.id ? "border-indigo-600 bg-indigo-600" : "border-gray-300"}`} />
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        {/* Success / Error */}
+                        {txHash && (
+                            <div className="flex items-center gap-2 p-3 mb-4 bg-emerald-50 border border-emerald-100 rounded-xl">
+                                <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />
+                                <p className="text-xs text-emerald-700 font-mono truncate">Dispatched! Tx: {txHash.slice(0, 20)}...</p>
+                            </div>
+                        )}
+                        {txError && (
+                            <div className="flex items-center gap-2 p-3 mb-4 bg-red-50 border border-red-100 rounded-xl">
+                                <AlertCircle size={14} className="text-red-400 shrink-0" />
+                                <p className="text-xs text-red-600 truncate">{txError}</p>
+                            </div>
+                        )}
+
+                        <div className="p-4 bg-indigo-50 border border-indigo-100 rounded-xl flex items-center justify-between">
+                            <div>
+                                <p className="text-sm font-semibold text-indigo-700">
+                                    {selectedFinishedProduct ? `Selected: ${selectedFinishedProduct}` : "Select a product above"}
+                                </p>
+                                <p className="text-xs text-indigo-400 mt-0.5">Dispatching transfers ownership to the Distributor wallet on-chain.</p>
+                            </div>
+                            <button
+                                onClick={handleDispatchToDistributor}
+                                disabled={txLoading || !selectedFinishedProduct}
+                                className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium px-4 py-2 rounded-xl transition-colors"
+                            >
+                                {txLoading ? "Dispatching..." : "Dispatch"} <ArrowRight size={14} />
+                            </button>
                         </div>
                     </div>
                 )}
@@ -378,43 +677,32 @@ export default function ManufacturerDashboard() {
                         <SectionHeader label="Blockchain Ledger" title="Production Records" />
 
                         <div className="space-y-4">
-                            {/* Blockchain blocks */}
-                            {[
-                                { block: "Block 102", id: "DT2026-001", owner: "MFG01", stage: "Production Completed", ts: "05-01-2026 10:35 AM", hash: "0xA45F89B21C", prev: "0x58ac2345bdf..." },
-                                { block: "Block 103", id: "DT2026-001", owner: "DIST01", stage: "Dispatched for Distribution", ts: "20-01-2026 02:15 PM", hash: "0xB98D72KLM4", prev: "0xA45F89B21C..." },
-                                { block: "Block 104", id: "DT2026-002", owner: "MFG01", stage: "Production Completed", ts: "13-05-2026 09:00 AM", hash: "0xC12E45NOP7", prev: "0xB98D72KLM4..." },
-                            ].map((b, i) => (
-                                <div key={i} className="border border-gray-100 rounded-xl p-5 hover:border-indigo-100 transition-colors">
+                            {allHistory.map((entry, i) => (
+                                <div key={i} className="border border-gray-100 rounded-xl p-5">
                                     <div className="flex items-center justify-between mb-4">
                                         <div className="flex items-center gap-2">
                                             <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center">
                                                 <ShieldCheck size={14} className="text-white" />
                                             </div>
-                                            <span className="text-sm font-bold text-gray-900">{b.block}</span>
+                                            <span className="text-sm font-bold text-gray-900">Record #{i + 1}</span>
                                             <span className="text-[11px] bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full font-medium">Confirmed</span>
                                         </div>
                                         <span className="text-[11px] text-gray-400 flex items-center gap-1">
-                                            <Clock size={11} /> {b.ts}
+                                            <Clock size={11} /> {entry.timestamp}
                                         </span>
                                     </div>
-
                                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                                         {[
-                                            { k: "Product ID", v: b.id },
-                                            { k: "Owner", v: b.owner },
-                                            { k: "Stage", v: b.stage },
-                                            { k: "Tx Hash", v: b.hash },
+                                            { k: "Actor", v: `${entry.actor.slice(0, 6)}...${entry.actor.slice(-4)}` },
+                                            { k: "Stage", v: entry.stage },
+                                            { k: "Notes", v: entry.notes },
+                                            { k: "Timestamp", v: entry.timestamp },
                                         ].map((row) => (
                                             <div key={row.k} className="bg-gray-50 rounded-lg p-2.5">
                                                 <p className="text-[10px] text-gray-400 uppercase tracking-wider mb-1">{row.k}</p>
                                                 <p className="text-xs font-semibold text-gray-800 font-mono truncate">{row.v}</p>
                                             </div>
                                         ))}
-                                    </div>
-
-                                    <div className="mt-3 flex items-center gap-1.5 text-[11px] text-gray-400">
-                                        <TrendingUp size={11} />
-                                        Prev hash: <span className="font-mono">{b.prev}</span>
                                     </div>
                                 </div>
                             ))}

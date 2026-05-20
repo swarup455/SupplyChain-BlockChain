@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { useNavigate } from "react-router-dom";
 import { logoutUser } from "../../redux/authSlice";
@@ -8,29 +8,11 @@ import {
     BarChart3, Trees, MapPin, ChevronRight, Activity,
     Hash, Calendar, User, PackageCheck, FileCheck
 } from "lucide-react";
-
-// ── Mock data ──────────────────────────────────────────────────────────────
-const STATS = [
-    { label: "Timber Batches Registered", value: "47", sub: "+3 this week", icon: <Trees size={18} />, color: "bg-emerald-50 text-emerald-600" },
-    { label: "Batches Dispatched", value: "38", sub: "+2 today", icon: <Truck size={18} />, color: "bg-indigo-50 text-indigo-600" },
-    { label: "Pending Dispatch", value: "9", sub: "Awaiting shipment", icon: <Clock size={18} />, color: "bg-amber-50 text-amber-600" },
-    { label: "Blockchain Records", value: "47", sub: "Immutable entries", icon: <ShieldCheck size={18} />, color: "bg-purple-50 text-purple-600" },
-];
-
-const BATCHES = [
-    { id: "TMB-1001", type: "Teak Wood", origin: "Assam Forest Zone", qty: "200 kg", cert: "FSC Approved", date: "01 Jan 2026", status: "dispatched" },
-    { id: "TMB-1002", type: "Mahogany", origin: "West Bengal Forest", qty: "150 kg", cert: "FSC Approved", date: "08 Mar 2026", status: "dispatched" },
-    { id: "TMB-1003", type: "Rosewood", origin: "Assam Forest Zone", qty: "80 kg", cert: "Pending", date: "10 May 2026", status: "pending" },
-    { id: "TMB-1004", type: "Walnut", origin: "Meghalaya Reserve", qty: "120 kg", cert: "FSC Approved", date: "12 May 2026", status: "pending" },
-];
-
-const ACTIVITY = [
-    { text: "Batch TMB-1002 dispatched to Manufacturer MFG01", time: "3h ago", type: "success" },
-    { text: "Timber batch TMB-1003 registered with FSC certification pending", time: "6h ago", type: "warning" },
-    { text: "Blockchain record created for TMB-1001", time: "1d ago", type: "success" },
-    { text: "Batch TMB-1004 harvested and logged", time: "2d ago", type: "info" },
-    { text: "Certification renewed for batch TMB-1002", time: "3d ago", type: "success" },
-];
+import { registerProduct, transferOwnership, getProductHistory } from "../../blockchain/contract";
+import { getWalletAddress, onAccountChange } from "../../blockchain/provider";
+import { WALLETS } from "../../blockchain/wallets";
+import { generateBatchID } from "../../utils/generateIds";
+import { toast } from "react-toastify";
 
 // ── Status badge ────────────────────────────────────────────────────────────
 function StatusBadge({ status }) {
@@ -80,6 +62,99 @@ export default function SupplierDashboard() {
     const navigate = useNavigate();
     const { user } = useSelector((state) => state.auth);
     const [activeTab, setActiveTab] = useState("overview");
+    const [walletAddress, setWalletAddress] = useState("");
+    const [txLoading, setTxLoading] = useState(false);
+    const [txHash, setTxHash] = useState("");
+    const [txError, setTxError] = useState("");
+    const [selectedBatch, setSelectedBatch] = useState("");
+    const [blockchainProducts, setBlockchainProducts] = useState([]);
+    const [loadingProducts, setLoadingProducts] = useState(false);
+    const [allHistory, setAllHistory] = useState([]);
+
+    // Replace the STATS with this:
+    const STATS = [
+        { label: "Timber Batches Registered", value: blockchainProducts.length.toString(), sub: "On blockchain", icon: <Trees size={18} />, color: "bg-emerald-50 text-emerald-600" },
+        { label: "Batches Dispatched", value: blockchainProducts.filter(p => p.stage > 0).length.toString(), sub: "Transferred", icon: <Truck size={18} />, color: "bg-indigo-50 text-indigo-600" },
+        { label: "Pending Dispatch", value: blockchainProducts.filter(p => p.stage === 0).length.toString(), sub: "Awaiting shipment", icon: <Clock size={18} />, color: "bg-amber-50 text-amber-600" },
+        { label: "Blockchain Records", value: allHistory.length.toString(), sub: "Immutable entries", icon: <ShieldCheck size={18} />, color: "bg-purple-50 text-purple-600" },
+    ];
+
+    useEffect(() => {
+        const fetchHistory = async () => {
+            if (blockchainProducts.length === 0) return;
+            const histories = await Promise.all(
+                blockchainProducts.map(p => getProductHistory(p.id))
+            );
+            setAllHistory(histories.flat());
+        };
+        fetchHistory();
+    }, [blockchainProducts]);
+
+    // After getting wallet address, verify it's the supplier
+    useEffect(() => {
+        const checkRole = async () => {
+            const address = await getWalletAddress();
+            setWalletAddress(address);
+
+            if (address.toLowerCase() !== WALLETS.supplier.toLowerCase()) {
+                alert("⚠️ Please switch MetaMask to the Supplier account!");
+            }
+        };
+        checkRole();
+    }, []);
+
+    // Fetch all registered products from blockchain
+    useEffect(() => {
+        const fetchProducts = async () => {
+            setLoadingProducts(true);
+            try {
+                const { ethers } = await import("ethers");
+                const { ABI, CONTRACT_ADDRESS } = await import("../../blockchain/config");
+
+                const provider = new ethers.BrowserProvider(window.ethereum);
+                const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
+
+                // Get total product count
+                const total = await contract.allProductIDs.length; // won't work directly
+
+                // Better: listen to events OR fetch by known IDs
+                const ids = await Promise.all(
+                    [...Array(20).keys()].map(i =>
+                        contract.allProductIDs(i).catch(() => null)
+                    )
+                );
+
+                const products = await Promise.all(
+                    ids.filter(Boolean).map(id => contract.getProduct(id))
+                );
+
+                setBlockchainProducts(products.map(p => ({
+                    id: p.productID,
+                    timberBatchID: p.timberBatchID,
+                    stage: Number(p.stage),
+                    currentOwner: p.currentOwner,
+                    timestamp: new Date(Number(p.timestamp) * 1000).toLocaleDateString(),
+                    status: Number(p.stage) === 0 ? "registered" : "dispatched"
+                })));
+            } catch (err) {
+                console.error("Failed to fetch products:", err);
+            } finally {
+                setLoadingProducts(false);
+            }
+        };
+
+        if (window.ethereum) fetchProducts();
+    }, [txHash]); // refetch after every transaction
+
+    const [formData, setFormData] = useState({
+        batchID: generateBatchID(), // ← auto-generated
+        woodType: "",
+        origin: "",
+        supplierID: user?.userId || "SUP01",
+        quantity: "",
+        harvestDate: "",
+        certification: "",
+    });
 
     const handleLogout = () => {
         dispatch(logoutUser());
@@ -92,6 +167,44 @@ export default function SupplierDashboard() {
         { id: "dispatch", label: "Dispatch Batches", icon: <Truck size={15} /> },
         { id: "records", label: "Timber Records", icon: <ClipboardList size={15} /> },
     ];
+
+    useEffect(() => {
+        getWalletAddress().then(setWalletAddress).catch(console.error);
+        onAccountChange((newAddress) => setWalletAddress(newAddress));
+    }, []);
+
+    const handleFormChange = (field, value) => {
+        setFormData((prev) => ({ ...prev, [field]: value }));
+    };
+
+    const handleRegisterTimber = async () => {
+        setTxLoading(true);
+        setTxError("");
+        setTxHash("");
+        try {
+            const notes = `${formData.woodType} | ${formData.origin} | ${formData.certification} | Qty: ${formData.quantity}kg`;
+            const hash = await registerProduct(formData.batchID, formData.batchID, notes);
+            setTxHash(hash);
+        } catch (err) {
+            setTxError(err.message || "Transaction failed");
+        } finally {
+            setTxLoading(false);
+        }
+    };
+
+    const handleDispatch = async (batchID, manufacturerWallet) => {
+        setTxLoading(true);
+        setTxError("");
+        setTxHash("");
+        try {
+            const hash = await transferOwnership(batchID, manufacturerWallet, "Dispatched to Manufacturer");
+            setTxHash(hash);
+        } catch (err) {
+            setTxError(err.message || "Dispatch failed");
+        } finally {
+            setTxLoading(false);
+        }
+    };
 
     return (
         <div className="min-h-screen bg-[#f5f5f7]">
@@ -112,7 +225,9 @@ export default function SupplierDashboard() {
                             <div className="w-6 h-6 bg-emerald-100 rounded-full flex items-center justify-center">
                                 <User size={12} className="text-emerald-600" />
                             </div>
-                            <span className="text-xs font-medium text-gray-700">{user?.name ?? "Supplier"}</span>
+                            <span className="text-xs font-medium text-gray-700">
+                                {walletAddress ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}` : "Not connected"}
+                            </span>
                         </div>
                         <button
                             onClick={handleLogout}
@@ -177,15 +292,15 @@ export default function SupplierDashboard() {
                         <div className="lg:col-span-2 bg-white border border-gray-100 rounded-2xl p-6">
                             <SectionHeader label="Timber" title="Recent Batches" action="View all" />
                             <div className="space-y-3">
-                                {BATCHES.slice(0, 3).map((b) => (
+                                {blockchainProducts.slice(0, 3).map((b) => (
                                     <div key={b.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl hover:bg-indigo-50/50 transition-colors">
                                         <div className="flex items-center gap-3">
                                             <div className="w-9 h-9 bg-emerald-100 rounded-xl flex items-center justify-center shrink-0">
                                                 <Trees size={16} className="text-emerald-600" />
                                             </div>
                                             <div>
-                                                <p className="text-sm font-semibold text-gray-900">{b.type}</p>
-                                                <p className="text-[11px] text-gray-400">{b.id} · {b.date}</p>
+                                                <p className="text-sm font-semibold text-gray-900">{b.id}</p>
+                                                <p className="text-[11px] text-gray-400">{b.id} · {b.timestamp}</p>
                                             </div>
                                         </div>
                                         <StatusBadge status={b.status} />
@@ -198,22 +313,22 @@ export default function SupplierDashboard() {
                         <div className="bg-white border border-gray-100 rounded-2xl p-6">
                             <SectionHeader label="Live" title="Activity Feed" />
                             <div className="space-y-4">
-                                {ACTIVITY.map((a, i) => (
+                                {allHistory.slice(0, 5).map((entry, i) => (
                                     <div key={i} className="flex gap-3">
-                                        <div className={`mt-0.5 w-6 h-6 rounded-full flex items-center justify-center shrink-0
-                                            ${a.type === "success" ? "bg-emerald-50 text-emerald-500"
-                                                : a.type === "warning" ? "bg-amber-50 text-amber-500"
-                                                    : "bg-indigo-50 text-indigo-500"}`}>
-                                            {a.type === "success" ? <CheckCircle2 size={13} />
-                                                : a.type === "warning" ? <AlertCircle size={13} />
-                                                    : <Activity size={13} />}
+                                        <div className="mt-0.5 w-6 h-6 rounded-full flex items-center justify-center shrink-0 bg-emerald-50 text-emerald-500">
+                                            <CheckCircle2 size={13} />
                                         </div>
                                         <div>
-                                            <p className="text-xs text-gray-700 leading-relaxed">{a.text}</p>
-                                            <p className="text-[11px] text-gray-400 mt-0.5">{a.time}</p>
+                                            <p className="text-xs text-gray-700 leading-relaxed">
+                                                {entry.stage} — {entry.notes}
+                                            </p>
+                                            <p className="text-[11px] text-gray-400 mt-0.5">{entry.timestamp}</p>
                                         </div>
                                     </div>
                                 ))}
+                                {allHistory.length === 0 && (
+                                    <p className="text-xs text-gray-400">No activity yet.</p>
+                                )}
                             </div>
                         </div>
 
@@ -252,12 +367,12 @@ export default function SupplierDashboard() {
                             <SectionHeader label="Blockchain Entry" title="Register Timber Batch" />
                             <div className="space-y-4">
                                 {[
-                                    { label: "Batch ID", placeholder: "e.g. TMB-1005", icon: <Hash size={14} /> },
-                                    { label: "Wood Type", placeholder: "e.g. Teak Wood", icon: <Trees size={14} /> },
-                                    { label: "Forest / Origin Location", placeholder: "e.g. Assam Forest Zone", icon: <MapPin size={14} /> },
-                                    { label: "Supplier ID", placeholder: "e.g. SUP01", icon: <User size={14} /> },
-                                    { label: "Quantity (kg)", placeholder: "e.g. 200", icon: <PackageCheck size={14} /> },
-                                    { label: "Harvest Date", placeholder: "", icon: <Calendar size={14} />, type: "date" },
+                                    { label: "Batch ID", field: "batchID", placeholder: "e.g. TMB-1005", icon: <Hash size={14} /> },
+                                    { label: "Wood Type", field: "woodType", placeholder: "e.g. Teak Wood", icon: <Trees size={14} /> },
+                                    { label: "Forest / Origin Location", field: "origin", placeholder: "e.g. Assam Forest Zone", icon: <MapPin size={14} /> },
+                                    { label: "Supplier ID", field: "supplierID", placeholder: "e.g. SUP01", icon: <User size={14} /> },
+                                    { label: "Quantity (kg)", field: "quantity", placeholder: "e.g. 200", icon: <PackageCheck size={14} /> },
+                                    { label: "Harvest Date", field: "harvestDate", placeholder: "", icon: <Calendar size={14} />, type: "date" },
                                 ].map((f) => (
                                     <div key={f.label}>
                                         <label className="block text-[11px] font-medium uppercase tracking-widest text-gray-400 mb-1.5">
@@ -268,8 +383,21 @@ export default function SupplierDashboard() {
                                             <input
                                                 type={f.type ?? "text"}
                                                 placeholder={f.placeholder}
-                                                className="w-full pl-9 pr-3 py-2.5 border border-gray-200 rounded-xl text-sm text-gray-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/10"
+                                                value={formData[f.field]}
+                                                onChange={(e) => setFormData(prev => ({ ...prev, [f.field]: e.target.value }))}
+                                                readOnly={f.field === "batchID" || f.field === "supplierID"}
+                                                className={`w-full pl-9 pr-3 py-2.5 border border-gray-200 rounded-xl text-sm text-gray-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/10
+        ${f.field === "batchID" || f.field === "supplierID" ? "bg-gray-50 text-gray-400 cursor-not-allowed" : ""}`}
                                             />
+                                            {f.label === "Batch ID" &&
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setFormData(prev => ({ ...prev, batchID: generateBatchID() }))}
+                                                    className="absolute right-3 text-[11px] text-indigo-400 hover:text-indigo-600"
+                                                >
+                                                    ↻ Generate
+                                                </button>
+                                            }
                                         </div>
                                     </div>
                                 ))}
@@ -280,7 +408,11 @@ export default function SupplierDashboard() {
                                     </label>
                                     <div className="relative flex items-center">
                                         <FileCheck size={14} className="absolute left-3 text-gray-300" />
-                                        <select className="w-full pl-9 pr-3 py-2.5 border border-gray-200 rounded-xl text-sm text-gray-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/10 appearance-none bg-white">
+                                        <select
+                                            value={formData.certification}
+                                            onChange={(e) => setFormData(prev => ({ ...prev, certification: e.target.value }))}
+                                            className="w-full pl-9 pr-3 py-2.5 border border-gray-200 rounded-xl text-sm text-gray-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/10 appearance-none bg-white"
+                                        >
                                             <option value="">Select status</option>
                                             <option>FSC Approved</option>
                                             <option>Pending</option>
@@ -289,10 +421,27 @@ export default function SupplierDashboard() {
                                     </div>
                                 </div>
 
-                                <button className="w-full py-2.5 mt-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-medium flex items-center justify-center gap-2 transition-colors">
+                                <button
+                                    onClick={handleRegisterTimber}
+                                    disabled={txLoading}
+                                    className="w-full py-2.5 mt-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl text-sm font-medium flex items-center justify-center gap-2 transition-colors"
+                                >
                                     <ShieldCheck size={15} />
-                                    Register to Blockchain
+                                    {txLoading ? "Registering..." : "Register to Blockchain"}
                                 </button>
+
+                                {/* Show success or error below button */}
+                                {txHash && (
+                                    <div className="mt-3 p-3 bg-emerald-50 border border-emerald-100 rounded-xl">
+                                        <p className="text-xs text-emerald-600 font-medium">✅ Registered successfully!</p>
+                                        <p className="text-[11px] font-mono text-emerald-500 mt-1 truncate">Tx: {txHash}</p>
+                                    </div>
+                                )}
+                                {txError && (
+                                    <div className="mt-3 p-3 bg-red-50 border border-red-100 rounded-xl">
+                                        <p className="text-xs text-red-500">❌ {txError}</p>
+                                    </div>
+                                )}
                             </div>
                         </div>
 
@@ -300,25 +449,31 @@ export default function SupplierDashboard() {
                         <div className="bg-white border border-gray-100 rounded-2xl p-6">
                             <SectionHeader label="Registered" title="Timber Batches on Blockchain" />
                             <div className="space-y-3">
-                                {BATCHES.map((b) => (
+                                {loadingProducts ? (
+                                    <div className="flex flex-col items-center justify-center py-10 text-gray-300">
+                                        <Clock size={32} className="mb-2 animate-spin" />
+                                        <p className="text-xs text-gray-400">Loading from blockchain...</p>
+                                    </div>
+                                ) : blockchainProducts.length === 0 ? (
+                                    <div className="flex flex-col items-center justify-center py-10 text-gray-300">
+                                        <Trees size={32} className="mb-2" />
+                                        <p className="text-sm font-medium text-gray-400">No batches registered yet</p>
+                                        <p className="text-xs text-gray-300 mt-1">Register your first timber batch to get started</p>
+                                    </div>
+                                ) : blockchainProducts.map((b) => (
                                     <div key={b.id} className="border border-gray-100 rounded-xl p-4 hover:border-indigo-100 transition-colors">
                                         <div className="flex items-start justify-between mb-2">
                                             <div>
-                                                <p className="text-sm font-semibold text-gray-900">{b.type}</p>
-                                                <p className="text-xs text-gray-400 mt-0.5">{b.id} · {b.date}</p>
+                                                <p className="text-sm font-semibold text-gray-900">{b.id}</p>
+                                                <p className="text-xs text-gray-400 mt-0.5">{b.timberBatchID} · {b.timestamp}</p>
                                             </div>
                                             <StatusBadge status={b.status} />
                                         </div>
                                         <div className="flex items-center gap-2 mt-2">
-                                            <MapPin size={11} className="text-gray-300" />
-                                            <span className="text-[11px] text-gray-400">{b.origin}</span>
-                                        </div>
-                                        <div className="flex items-center justify-between mt-2">
-                                            <div className="flex items-center gap-2">
-                                                <PackageCheck size={11} className="text-gray-300" />
-                                                <span className="text-[11px] text-gray-400">{b.qty}</span>
-                                            </div>
-                                            <CertBadge cert={b.cert} />
+                                            <User size={11} className="text-gray-300" />
+                                            <span className="text-[11px] text-gray-400 font-mono">
+                                                {b.currentOwner.slice(0, 6)}...{b.currentOwner.slice(-4)}
+                                            </span>
                                         </div>
                                     </div>
                                 ))}
@@ -327,7 +482,6 @@ export default function SupplierDashboard() {
                     </div>
                 )}
 
-                {/* ══ DISPATCH BATCHES ════════════════════════════════════ */}
                 {activeTab === "dispatch" && (
                     <div className="bg-white border border-gray-100 rounded-2xl p-6">
                         <SectionHeader label="Outgoing" title="Dispatch Timber to Manufacturers" />
@@ -336,7 +490,7 @@ export default function SupplierDashboard() {
                             <table className="w-full text-sm">
                                 <thead>
                                     <tr className="border-b border-gray-100">
-                                        {["Batch ID", "Wood Type", "Origin", "Quantity", "Certification", "Date", "Status"].map((h) => (
+                                        {["Product ID", "Timber Batch", "Current Owner", "Registered On", "Status"].map((h) => (
                                             <th key={h} className="text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wider pb-3 pr-4">
                                                 {h}
                                             </th>
@@ -344,16 +498,20 @@ export default function SupplierDashboard() {
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-gray-50">
-                                    {BATCHES.map((b) => (
-                                        <tr key={b.id} className="hover:bg-gray-50 transition-colors">
+                                    {blockchainProducts.map((b) => (
+                                        <tr
+                                            key={b.id}
+                                            onClick={() => setSelectedBatch(b.id)}
+                                            className={`cursor-pointer transition-colors ${selectedBatch === b.id ? "bg-indigo-50" : "hover:bg-gray-50"}`}
+                                        >
                                             <td className="py-3 pr-4">
                                                 <span className="font-mono text-xs bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-md">{b.id}</span>
                                             </td>
-                                            <td className="py-3 pr-4 text-xs text-gray-700 font-medium">{b.type}</td>
-                                            <td className="py-3 pr-4 text-xs text-gray-500">{b.origin}</td>
-                                            <td className="py-3 pr-4 text-xs text-gray-500">{b.qty}</td>
-                                            <td className="py-3 pr-4"><CertBadge cert={b.cert} /></td>
-                                            <td className="py-3 pr-4 text-xs text-gray-400">{b.date}</td>
+                                            <td className="py-3 pr-4 text-xs text-gray-700 font-medium">{b.timberBatchID}</td>
+                                            <td className="py-3 pr-4 text-xs text-gray-500 font-mono">
+                                                {b.currentOwner.slice(0, 6)}...{b.currentOwner.slice(-4)}
+                                            </td>
+                                            <td className="py-3 pr-4 text-xs text-gray-500">{b.timestamp}</td>
                                             <td className="py-3"><StatusBadge status={b.status} /></td>
                                         </tr>
                                     ))}
@@ -366,8 +524,12 @@ export default function SupplierDashboard() {
                                 <p className="text-sm font-semibold text-indigo-700">Dispatch selected batch</p>
                                 <p className="text-xs text-indigo-400 mt-0.5">Dispatching creates an immutable ownership transfer on the blockchain.</p>
                             </div>
-                            <button className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium px-4 py-2 rounded-xl transition-colors">
-                                Dispatch to Manufacturer <ArrowRight size={14} />
+                            <button
+                                onClick={() => handleDispatch(selectedBatch, WALLETS.manufacturer)}
+                                disabled={txLoading || !selectedBatch}
+                                className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-xl transition-colors whitespace-nowrap"
+                            >
+                                {txLoading ? "Dispatching..." : `Dispatch ${selectedBatch || "..."} to Manufacturer`}
                             </button>
                         </div>
                     </div>
@@ -379,31 +541,36 @@ export default function SupplierDashboard() {
                         <SectionHeader label="Blockchain Ledger" title="Timber Registration Records" />
 
                         <div className="space-y-4">
-                            {[
-                                { block: "Block 101", id: "TMB-1001", owner: "SUP01", stage: "Timber Registration", ts: "01-01-2026 09:00 AM", hash: "0x58ac2345bdf", prev: "0x00000000000..." },
-                                { block: "Block 102", id: "TMB-1001", owner: "MFG01", stage: "Dispatched to Manufacturer", ts: "10-01-2026 11:20 AM", hash: "0xA45F89B21C", prev: "0x58ac2345bdf..." },
-                                { block: "Block 105", id: "TMB-1002", owner: "SUP01", stage: "Timber Registration", ts: "08-03-2026 08:45 AM", hash: "0xD34F67RST9", prev: "0xC12E45NOP7..." },
-                            ].map((b, i) => (
+                            {loadingProducts ? (
+                                <p className="text-xs text-gray-400 text-center py-8">Loading from blockchain...</p>
+                            ) : allHistory.length === 0 ? (
+                                <p className="text-xs text-gray-400 text-center py-8">No blockchain records yet.</p>
+                            ) : allHistory.map((entry, i) => (
                                 <div key={i} className="border border-gray-100 rounded-xl p-5 hover:border-indigo-100 transition-colors">
+
+                                    {/* Header */}
                                     <div className="flex items-center justify-between mb-4">
                                         <div className="flex items-center gap-2">
                                             <div className="w-8 h-8 bg-emerald-600 rounded-lg flex items-center justify-center">
                                                 <Trees size={14} className="text-white" />
                                             </div>
-                                            <span className="text-sm font-bold text-gray-900">{b.block}</span>
-                                            <span className="text-[11px] bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full font-medium">Confirmed</span>
+                                            <span className="text-sm font-bold text-gray-900">Record #{i + 1}</span>
+                                            <span className="text-[11px] bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full font-medium">
+                                                Confirmed
+                                            </span>
                                         </div>
                                         <span className="text-[11px] text-gray-400 flex items-center gap-1">
-                                            <Clock size={11} /> {b.ts}
+                                            <Clock size={11} /> {entry.timestamp}
                                         </span>
                                     </div>
 
+                                    {/* Data grid */}
                                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                                         {[
-                                            { k: "Batch ID", v: b.id },
-                                            { k: "Owner", v: b.owner },
-                                            { k: "Stage", v: b.stage },
-                                            { k: "Tx Hash", v: b.hash },
+                                            { k: "Actor", v: `${entry.actor.slice(0, 6)}...${entry.actor.slice(-4)}` },
+                                            { k: "Stage", v: entry.stage },
+                                            { k: "Notes", v: entry.notes },
+                                            { k: "Timestamp", v: entry.timestamp },
                                         ].map((row) => (
                                             <div key={row.k} className="bg-gray-50 rounded-lg p-2.5">
                                                 <p className="text-[10px] text-gray-400 uppercase tracking-wider mb-1">{row.k}</p>
@@ -412,10 +579,6 @@ export default function SupplierDashboard() {
                                         ))}
                                     </div>
 
-                                    <div className="mt-3 flex items-center gap-1.5 text-[11px] text-gray-400">
-                                        <TrendingUp size={11} />
-                                        Prev hash: <span className="font-mono">{b.prev}</span>
-                                    </div>
                                 </div>
                             ))}
                         </div>
