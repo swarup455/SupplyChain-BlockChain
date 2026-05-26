@@ -46,7 +46,7 @@ const App = () => {
       {/* Public */}
       <Route path="/" element={!user ? <LandingPage /> : <Navigate to={getRoleRoute(user.role)} replace />} />
       <Route path="/auth" element={!user ? <AuthPage /> : <Navigate to={getRoleRoute(user.role)} replace />} />
-      <Route path="/verify" element={<VerifyProduct />} />
+      <Route path="/verify/:productId" element={<VerifyProduct />} />
       <Route path="/contact" element={<ContactPage />} />
       <Route path="*" element={<NotFound />} />
 
