@@ -9,8 +9,8 @@ import {
     deleteStakeholder,
     resetPassword,
 } from "../controllers/adminController.js";
-import { protect } from "../middlewares/authMiddleware.js";
-import { isAdmin } from "../middlewares/authMiddleware.js";
+import { protect } from "../middlewares/protect.js";
+import { isAdmin } from "../middlewares/protect.js";
 
 const adminRouter = express.Router();
 
