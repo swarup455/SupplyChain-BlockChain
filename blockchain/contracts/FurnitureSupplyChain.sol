@@ -121,8 +121,8 @@ contract FurnitureSupplyChain {
         HistoryEntry[] storage oldHistory = productHistory[_sourceTimberID];
 
         for (uint i = 0; i < oldHistory.length; i++) {
-            productHistory[_newProd        uctID].push(oldHistory[i]);
-        }
+    productHistory[_newProductID].push(oldHistory[i]);
+}
 
         productHistory[_newProductID].push(HistoryEntry({
             actor: msg.sender,
